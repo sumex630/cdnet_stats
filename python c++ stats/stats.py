@@ -10,12 +10,7 @@
 import csv
 import os
 import subprocess
-import time
-from pprint import pprint
-import multiprocessing as mp
 
-import cv2
-import numpy as np
 import pandas as pd
 
 call = subprocess.call
@@ -219,12 +214,16 @@ def stats(dataset_root, binary_root, stats_root):
             category_video = dirpath_list[-2:]  # 保存时的索引名称 stats
 
             # 数据集的视频序列路径
-            dataset_video_path = os.path.join(dataset_root, dirpath_list[-2], dirpath_list[-2], dirpath_list[-1])
+            dataset_video_path = os.path.join(dataset_root, dirpath_list[-2], dirpath_list[-1])
+            if not os.path.exists(dataset_video_path):
+                dataset_video_path = os.path.join(dataset_root, dirpath_list[-2], dirpath_list[-2], dirpath_list[-1])
+
             if is_valid_video_folder(dataset_video_path):
+                # 计算混淆矩阵
                 confusion_matrix = compare_with_groungtruth(dataset_video_path, dirpath)
 
                 frames_stats = get_stats(confusion_matrix)  # 7中度量
-                frames_category = get_category_video(category_video)  # 索引名
+                frames_category = get_category_video(category_video)  # 索引名 stats
                 frames_category.update(frames_stats)  # 合并数据
 
                 # 保存数据
@@ -236,9 +235,11 @@ def stats(dataset_root, binary_root, stats_root):
 
 if __name__ == '__main__':
     # dataset_root = 'F:/Dataset/CDNet2012/'  # 数据集根目录
-    dataset_root = 'F:\Dataset\CDNet2014\dataset'  # 数据集根目录
-    # binary_root = 'F:\\Pycharm\\01_CV\morphology\\results\\gmm_default_k=5\\gmm_default_k=5'  # 检测结果根目录
-    binary_root = 'F:\\Pycharm\\01_CV\morphology\\results\\gmm_default_k=5\\morghology'  # 检测结果根目录
-    stats_root = './results_stats'  # 统计结果根目录
+    # 数据集根目录
+    dataset_root = 'F:\Dataset\CDNet2014\dataset'
+    # 检测结果根目录
+    binary_root = 'F:/Pycharm/01_CV/20210519_idea/20210526_yolact/yolact/results/yolact_diff2014/yolact_diff2014'
+    # 统计结果根目录
+    stats_root = './results_stats'
 
     stats(dataset_root, binary_root, stats_root)
