@@ -7,13 +7,56 @@
 @file: stats.py
 @brief:
 """
+import cv2
+import pandas as pd
+import argparse
 import csv
 import os
 import subprocess
 
-import pandas as pd
+import torch
 
 call = subprocess.call
+
+parser = argparse.ArgumentParser()
+
+# Input arguments  dataset_root, binary_root, stats_root
+parser.add_argument("--dr", help="filepath to the dataset_root", default="/home/lthpc/sumex/datasets/cdnet2014/dataset")
+parser.add_argument("--br", help="filepath to the binary_root", default="")
+parser.add_argument("--sr", help="filepath to the output_path", default="results_stats")
+
+args = parser.parse_args()
+
+
+class ConfusionMatrix:
+
+    def __init__(self):
+
+        self.TP = 0
+        self.FP = 0
+        self.FN = 0
+        self.TN = 0
+
+        self.GROUNDTRUTH_BG = 0
+        self.GROUNDTRUTH_FG = 255
+        self.BGS_THRESHOLD = 127
+
+        self.ones = None
+        self.zeros = None
+
+    def evaluate(self, mask, groundtruth, roi):
+        self.ones = torch.ones_like(mask, dtype = torch.float)
+        self.zeros = torch.zeros_like(mask, dtype = torch.float)
+
+        TP_mask = torch.where((mask == self.GROUNDTRUTH_FG) & (groundtruth == self.GROUNDTRUTH_FG) & (roi == self.GROUNDTRUTH_FG), self.ones, self.zeros)
+        FP_mask = torch.where((mask == self.GROUNDTRUTH_FG) & (groundtruth == self.GROUNDTRUTH_BG) & (roi == self.GROUNDTRUTH_FG), self.ones, self.zeros)
+        FN_mask = torch.where((mask == self.GROUNDTRUTH_BG) & (groundtruth == self.GROUNDTRUTH_FG) & (roi == self.GROUNDTRUTH_FG), self.ones, self.zeros)
+        TN_mask = torch.where((mask == self.GROUNDTRUTH_BG) & (groundtruth == self.GROUNDTRUTH_BG) & (roi == self.GROUNDTRUTH_FG), self.ones, self.zeros)
+
+        self.TP += torch.sum(TP_mask)
+        self.FP += torch.sum(FP_mask)
+        self.FN += torch.sum(FN_mask)
+        self.TN += torch.sum(TN_mask)
 
 
 def get_stats(cm):
@@ -79,7 +122,7 @@ def write_result_tocsv(stats_root, filename, data):
     :return:
     """
     if not os.path.exists(stats_root):
-        os.mkdir(stats_root)
+        os.makedirs(stats_root)
     stats_path = os.path.join(stats_root, filename)
     is_stats = True
     try:
@@ -108,17 +151,42 @@ def is_valid_video_folder(path):
            os.path.exists(os.path.join(path, 'temporalROI.txt'))
 
 
-def compare_with_groungtruth(videoPath, binaryPath):
+def get_temporalROI(path):
+    """
+    获取检测帧的范围
+    :param path:dataset/baseline/baseline/highway
+    :return:['470', '1700'] [起始帧，结束帧]
+    """
+    path = os.path.join(path, 'temporalROI.txt')
+    with open(path, 'r') as f:
+        avail_frames = f.read()
+
+    return avail_frames.split(' ')
+
+
+def compare_with_groundtruth(CM, videoPath, binaryPath):
     """Compare your binaries with the groundtruth and return the confusion matrix"""
-    statFilePath = os.path.join(videoPath, 'stats.txt')
-    delete_if_exists(statFilePath)
+    # print("videoPath", videoPath)
+    # print("binaryPath", binaryPath)
+    roi_path = os.path.join(videoPath, "ROI.bmp")
+    roi = torch.from_numpy(cv2.imread(roi_path, 0))
+    if "traffic" in videoPath:
+        roi_path_jpg = os.path.join(videoPath, "ROI.jpg")
+        roi_size = cv2.imread(roi_path_jpg, 0).shape
+        roi = torch.from_numpy(cv2.resize(cv2.imread(roi_path, 0), (roi_size[1], roi_size[0])))
 
-    groundtruthPath = os.path.join(videoPath, 'groundtruth')
-    retcode = call([os.path.join('exe', 'comparator.exe'),
-                    videoPath, binaryPath],
-                   shell=True)
+    vaild_frames = get_temporalROI(videoPath)  # 有效帧范围
+    start_frame_id = int(vaild_frames[0])  # 起始帧号
+    end_frame_id = int(vaild_frames[1])  # 结束帧号
+    # print(vaild_frames)
 
-    return read_cm_file(statFilePath)
+    for bin_filename in os.listdir(binaryPath)[start_frame_id-1:end_frame_id + 1]:
+        bin_path = os.path.join(binaryPath, bin_filename)
+        gt_path = os.path.join(videoPath, "groundtruth", bin_filename.replace("bin", "gt").replace("jpg", "png"))
+
+        CM.evaluate(torch.from_numpy(cv2.imread(bin_path, 0)), torch.from_numpy(cv2.imread(gt_path, 0)), roi)
+
+    return [CM.TP.numpy(), CM.FP.numpy(), CM.FN.numpy(), CM.TN.numpy(), 0]
 
 
 def delete_if_exists(path):
@@ -202,25 +270,32 @@ def stats(dataset_root, binary_root, stats_root):
     :return:
     """
     save_filename = ''
-
+    print(binary_root)
     for dirpath, dirnames, filenames in os.walk(binary_root):
         if filenames:  #  and 'boats' in dirpath  corridor traffic
-            # print('正在计算评估指标：', dirpath)
+            print('正在计算评估指标：', dirpath)
             dirpath_list = dirpath.replace('\\', '/').split('/')  # 切割路径
             algorithm_name_index = dirpath_list.index(os.path.basename(binary_root))  # binary_root 文件位置
             algorithm_name_type = dirpath_list[algorithm_name_index:-2]  #
-            save_filename = '_'.join(algorithm_name_type)  # 保存stats时的文件名
-            save_filename = save_filename + '.csv'
+            algorithm_name_type = dirpath_list[(algorithm_name_index - 1):-2] if len(algorithm_name_type) == 1 else algorithm_name_type
+            save_filename_ = '_'.join(algorithm_name_type) + '.csv'  # 保存stats时的文件名
+            if save_filename_ != save_filename:
+                if save_filename:
+                    # 综合统计
+                    write_category_and_overall_tocsv(stats_root, save_filename)
+                save_filename = save_filename_
+
             category_video = dirpath_list[-2:]  # 保存时的索引名称 stats
 
-            # 数据集的视频序列路径
+            # 数据集的视频序列路径mt=45_ratio=0.2_yolact_vibe
             dataset_video_path = os.path.join(dataset_root, dirpath_list[-2], dirpath_list[-1])
             if not os.path.exists(dataset_video_path):
                 dataset_video_path = os.path.join(dataset_root, dirpath_list[-2], dirpath_list[-2], dirpath_list[-1])
 
             if is_valid_video_folder(dataset_video_path):
-                # 计算混淆矩阵
-                confusion_matrix = compare_with_groungtruth(dataset_video_path, dirpath)
+                # 混淆矩阵
+                CM = ConfusionMatrix()
+                confusion_matrix = compare_with_groundtruth(CM, dataset_video_path, dirpath)
 
                 frames_stats = get_stats(confusion_matrix)  # 7中度量
                 frames_category = get_category_video(category_video)  # 索引名 stats
@@ -235,11 +310,25 @@ def stats(dataset_root, binary_root, stats_root):
 
 if __name__ == '__main__':
     # dataset_root = 'F:/Dataset/CDNet2012/'  # 数据集根目录
-    # 数据集根目录
-    dataset_root = 'F:\Dataset\CDNet2014\dataset'
-    # 检测结果根目录
-    binary_root = 'F:/Pycharm/01_CV/20210519_idea/20210526_yolact/yolact/results/yolact_diff2014/yolact_diff2014'
-    # 统计结果根目录
-    stats_root = './results_stats'
+    # # 数据集根目录
+    # dataset_root = 'E:/00_Datasets/dataset2014/dataset'
+    # # 检测结果根目录
+    # # binary_root = r'E:\01_PyCharm\01_CV\20210714_instance_segmentation\20210716_yolact\results\20210727_yolact_vibe\20210727_yolact_vibe'
+    # binary_root = r"E:\00_Datasets\subsense\subsense_cdnet2014\results"
+    # # binary_root = r'E:\01_PyCharm\01_CV\20210713_RT_SBS\ViBe\results\20210727_vibe\20210727_vibe'
+    # # 统计结果根目录
+    # # stats_root = r'E:\01_PyCharm\01_CV\20210714_instance_segmentation\20210716_yolact\results_stats'
+    # stats_root = r'results_stats'
+    # # stats_root = './results_stats'
+    # #################################################################
+    # dataset_root = args.dr
+    # binary_root = args.br
+    # stats_root = args.sr
+    # python python_stats/stats.py --br  --sr
+    dataset_root = args.dr
+    # "/home/lthpc/sumex/20210807_ISBS/20210811_ISBS/results/yolact_vibe/20210812_ratio=0.3_opt=0"
+    binary_root = args.br
+    # "/home/lthpc/sumex/20210807_ISBS/20210811_ISBS/results_stats"
+    stats_root = args.sr
 
     stats(dataset_root, binary_root, stats_root)
