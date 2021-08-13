@@ -24,6 +24,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--dr", help="filepath to the dataset_root", default="/home/lthpc/sumex/datasets/cdnet2014/dataset")
 parser.add_argument("--br", help="filepath to the binary_root", default="")
 parser.add_argument("--sr", help="filepath to the output_path", default="results_stats")
+parser.add_argument("--sub", help="filepath to the sub_output_path", default="")
 
 args = parser.parse_args()
 
@@ -37,9 +38,8 @@ class ConfusionMatrix:
         self.FN = 0
         self.TN = 0
 
-        self.GROUNDTRUTH_BG = 0
-        self.GROUNDTRUTH_FG = 255
-        self.BGS_THRESHOLD = 127
+        self.BG = 0
+        self.FG = 255
 
         self.ones = None
         self.zeros = None
@@ -48,10 +48,10 @@ class ConfusionMatrix:
         self.ones = torch.ones_like(mask, dtype = torch.float)
         self.zeros = torch.zeros_like(mask, dtype = torch.float)
 
-        TP_mask = torch.where((mask == self.GROUNDTRUTH_FG) & (groundtruth == self.GROUNDTRUTH_FG) & (roi == self.GROUNDTRUTH_FG), self.ones, self.zeros)
-        FP_mask = torch.where((mask == self.GROUNDTRUTH_FG) & (groundtruth == self.GROUNDTRUTH_BG) & (roi == self.GROUNDTRUTH_FG), self.ones, self.zeros)
-        FN_mask = torch.where((mask == self.GROUNDTRUTH_BG) & (groundtruth == self.GROUNDTRUTH_FG) & (roi == self.GROUNDTRUTH_FG), self.ones, self.zeros)
-        TN_mask = torch.where((mask == self.GROUNDTRUTH_BG) & (groundtruth == self.GROUNDTRUTH_BG) & (roi == self.GROUNDTRUTH_FG), self.ones, self.zeros)
+        TP_mask = torch.where((mask == self.FG) & (groundtruth == self.FG) & (roi == self.FG), self.ones, self.zeros)
+        FP_mask = torch.where((mask == self.FG) & (groundtruth == self.BG) & (roi == self.FG), self.ones, self.zeros)
+        FN_mask = torch.where((mask == self.BG) & (groundtruth == self.FG) & (roi == self.FG), self.ones, self.zeros)
+        TN_mask = torch.where((mask == self.BG) & (groundtruth == self.BG) & (roi == self.FG), self.ones, self.zeros)
 
         self.TP += torch.sum(TP_mask)
         self.FP += torch.sum(FP_mask)
@@ -164,16 +164,23 @@ def get_temporalROI(path):
     return avail_frames.split(' ')
 
 
+def get_roi(video_path):
+    roi_path = os.path.join(video_path, "ROI.bmp")
+    roi = torch.from_numpy(cv2.imread(roi_path, 0))
+    if "traffic" in video_path:
+        # 数据集中 traffic 视频序列 的ROI.bmp 与数据集尺寸不同
+        roi_path_jpg = os.path.join(video_path, "ROI.jpg")
+        roi_size = cv2.imread(roi_path_jpg, 0).shape
+        roi = torch.from_numpy(cv2.resize(cv2.imread(roi_path, 0), (roi_size[1], roi_size[0])))
+
+    return roi
+
+
 def compare_with_groundtruth(CM, videoPath, binaryPath):
     """Compare your binaries with the groundtruth and return the confusion matrix"""
     # print("videoPath", videoPath)
     # print("binaryPath", binaryPath)
-    roi_path = os.path.join(videoPath, "ROI.bmp")
-    roi = torch.from_numpy(cv2.imread(roi_path, 0))
-    if "traffic" in videoPath:
-        roi_path_jpg = os.path.join(videoPath, "ROI.jpg")
-        roi_size = cv2.imread(roi_path_jpg, 0).shape
-        roi = torch.from_numpy(cv2.resize(cv2.imread(roi_path, 0), (roi_size[1], roi_size[0])))
+    roi = get_roi(videoPath)
 
     vaild_frames = get_temporalROI(videoPath)  # 有效帧范围
     start_frame_id = int(vaild_frames[0])  # 起始帧号
@@ -187,24 +194,6 @@ def compare_with_groundtruth(CM, videoPath, binaryPath):
         CM.evaluate(torch.from_numpy(cv2.imread(bin_path, 0)), torch.from_numpy(cv2.imread(gt_path, 0)), roi)
 
     return [CM.TP.numpy(), CM.FP.numpy(), CM.FN.numpy(), CM.TN.numpy(), 0]
-
-
-def delete_if_exists(path):
-    if os.path.exists(path):
-        os.remove(path)
-
-
-def read_cm_file(filePath):
-    """Read the file, so we can compute stats for video, category and overall."""
-    if not os.path.exists(filePath):
-        print("The file " + filePath + " doesn't exist.\nIt means there was an error calling the comparator.")
-        raise Exception('error')
-
-    with open(filePath) as f:
-        for line in f.readlines():
-            if line.startswith('cm:'):
-                numbers = line.split()[1:]
-                return [int(nb) for nb in numbers[:5]]
 
 
 def write_category_and_overall_tocsv(stats_root, save_filename):
@@ -270,10 +259,13 @@ def stats(dataset_root, binary_root, stats_root):
     :return:
     """
     save_filename = ''
-    print(binary_root)
+    ii = 0
+
+    #  os.walk(binary_root) 在ubuntu 中遍历出的文件名乱序
     for dirpath, dirnames, filenames in os.walk(binary_root):
         if filenames:  #  and 'boats' in dirpath  corridor traffic
-            print('正在计算评估指标：', dirpath)
+            ii += 1
+            print('{} 正在计算评估指标：{}'.format(ii, dirpath))
             dirpath_list = dirpath.replace('\\', '/').split('/')  # 切割路径
             algorithm_name_index = dirpath_list.index(os.path.basename(binary_root))  # binary_root 文件位置
             algorithm_name_type = dirpath_list[algorithm_name_index:-2]  #
@@ -309,26 +301,18 @@ def stats(dataset_root, binary_root, stats_root):
 
 
 if __name__ == '__main__':
-    # dataset_root = 'F:/Dataset/CDNet2012/'  # 数据集根目录
     # # 数据集根目录
     # dataset_root = 'E:/00_Datasets/dataset2014/dataset'
     # # 检测结果根目录
-    # # binary_root = r'E:\01_PyCharm\01_CV\20210714_instance_segmentation\20210716_yolact\results\20210727_yolact_vibe\20210727_yolact_vibe'
-    # binary_root = r"E:\00_Datasets\subsense\subsense_cdnet2014\results"
-    # # binary_root = r'E:\01_PyCharm\01_CV\20210713_RT_SBS\ViBe\results\20210727_vibe\20210727_vibe'
+    # binary_root = r"E:\01_PyCharm\01_CV\20210714_instance_segmentation\20210716_yolact\results\20210731_yolact_subsense\mt=45_ratio=0.3_yolact_vibe"
     # # 统计结果根目录
-    # # stats_root = r'E:\01_PyCharm\01_CV\20210714_instance_segmentation\20210716_yolact\results_stats'
     # stats_root = r'results_stats'
-    # # stats_root = './results_stats'
     # #################################################################
-    # dataset_root = args.dr
-    # binary_root = args.br
-    # stats_root = args.sr
     # python python_stats/stats.py --br  --sr
     dataset_root = args.dr
     # "/home/lthpc/sumex/20210807_ISBS/20210811_ISBS/results/yolact_vibe/20210812_ratio=0.3_opt=0"
     binary_root = args.br
     # "/home/lthpc/sumex/20210807_ISBS/20210811_ISBS/results_stats"
-    stats_root = args.sr
+    stats_root = os.path.join(args.sr, args.sub) if args.sub else args.sr
 
     stats(dataset_root, binary_root, stats_root)
