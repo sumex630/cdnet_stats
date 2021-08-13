@@ -176,6 +176,12 @@ def get_roi(video_path):
     return roi
 
 
+def get_gt(video_path, filename):
+    gt_path = os.path.join(video_path, "groundtruth", filename.replace("bin", "gt").replace("jpg", "png"))
+
+    return cv2.imread(gt_path, 0)
+
+
 def compare_with_groundtruth(CM, videoPath, binaryPath):
     """Compare your binaries with the groundtruth and return the confusion matrix"""
     # print("videoPath", videoPath)
@@ -187,11 +193,10 @@ def compare_with_groundtruth(CM, videoPath, binaryPath):
     end_frame_id = int(vaild_frames[1])  # 结束帧号
     # print(vaild_frames)
 
-    for bin_filename in os.listdir(binaryPath)[start_frame_id-1:end_frame_id + 1]:
+    for bin_filename in os.listdir(binaryPath)[start_frame_id - 1:end_frame_id + 1]:
         bin_path = os.path.join(binaryPath, bin_filename)
-        gt_path = os.path.join(videoPath, "groundtruth", bin_filename.replace("bin", "gt").replace("jpg", "png"))
 
-        CM.evaluate(torch.from_numpy(cv2.imread(bin_path, 0)), torch.from_numpy(cv2.imread(gt_path, 0)), roi)
+        CM.evaluate(torch.from_numpy(cv2.imread(bin_path, 0)), torch.from_numpy(get_gt(videoPath, bin_filename)), roi)
 
     return [CM.TP.numpy(), CM.FP.numpy(), CM.FN.numpy(), CM.TN.numpy(), 0]
 
