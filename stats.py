@@ -15,6 +15,7 @@ import os
 import subprocess
 
 import torch
+from tqdm import tqdm
 
 call = subprocess.call
 
@@ -33,10 +34,10 @@ class ConfusionMatrix:
 
     def __init__(self):
 
-        self.TP = 0
-        self.FP = 0
-        self.FN = 0
-        self.TN = 0
+        self.TP = 0  # 真正
+        self.FP = 0  # 假正
+        self.FN = 0  # 假负
+        self.TN = 0  # 真负
 
         self.BG = 0
         self.FG = 255
@@ -104,13 +105,13 @@ def get_stats(cm):
     return stats_dic
 
 
-def get_category_video(category_video):
+def get_category_video(category, video):
     """
     csv 索引
     :param category_video:
     :return: dict
     """
-    return {'category': category_video[0], 'video': category_video[1]}
+    return {'category': category, 'video': video}
 
 
 def write_result_tocsv(stats_root, filename, data):
@@ -166,12 +167,12 @@ def get_temporalROI(path):
 
 def get_roi(video_path):
     roi_path = os.path.join(video_path, "ROI.bmp")
-    roi = torch.from_numpy(cv2.imread(roi_path, 0))
+    roi = cv2.imread(roi_path, 0)
     if "traffic" in video_path:
         # 数据集中 traffic 视频序列 的ROI.bmp 与数据集尺寸不同
         roi_path_jpg = os.path.join(video_path, "ROI.jpg")
         roi_size = cv2.imread(roi_path_jpg, 0).shape
-        roi = torch.from_numpy(cv2.resize(cv2.imread(roi_path, 0), (roi_size[1], roi_size[0])))
+        roi = cv2.resize(cv2.imread(roi_path, 0), (roi_size[1], roi_size[0]))
 
     return roi
 
@@ -196,7 +197,9 @@ def compare_with_groundtruth(CM, videoPath, binaryPath):
     for bin_filename in os.listdir(binaryPath)[start_frame_id - 1:end_frame_id + 1]:
         bin_path = os.path.join(binaryPath, bin_filename)
 
-        CM.evaluate(torch.from_numpy(cv2.imread(bin_path, 0)), torch.from_numpy(get_gt(videoPath, bin_filename)), roi)
+        CM.evaluate(torch.from_numpy(cv2.imread(bin_path, 0)),
+                    torch.from_numpy(get_gt(videoPath, bin_filename)),
+                    torch.from_numpy(roi))
 
     return [CM.TP.numpy(), CM.FP.numpy(), CM.FN.numpy(), CM.TN.numpy(), 0]
 
@@ -255,6 +258,33 @@ def write_category_and_overall_tocsv(stats_root, save_filename):
     write_result_tocsv(stats_root, save_filename, category_dict)
 
 
+def get_save_filename(bin_path):
+    """
+    获取保存数据时的文件名
+    """
+    binary_root_list = bin_path.replace('\\', '/').split('/')  # 切割路径
+    save_filename_list = binary_root_list[-2:]  # 最后两个路径名称联合
+
+    # 保存stats时的文件名
+    return '_'.join(save_filename_list) + '.csv'
+
+
+def get_categories(dataset_dir):
+    """
+    Stores the list of categories as string and the videos of each
+    category in a dictionary.
+    """
+    categories = sorted(os.listdir(dataset_dir), key=lambda v: v.upper())
+
+    videos = dict()
+
+    for category in categories:
+        category_dir = os.path.join(dataset_dir, category)
+        videos[category] = sorted(os.listdir(category_dir), key=lambda v: v.upper())
+
+    return categories, videos
+
+
 def stats(dataset_root, binary_root, stats_root):
     """
     CDNET 数据集度量统计
@@ -263,61 +293,60 @@ def stats(dataset_root, binary_root, stats_root):
     :param stats_root: 保存统计结果路径
     :return:
     """
-    save_filename = ''
     ii = 0
+    # 保存数据时的文件名称
+    save_filename = get_save_filename(binary_root)
+    # Get the names of the categories and the videos
+    categories, videos = get_categories(dataset_root)
 
     #  os.walk(binary_root) 在ubuntu 中遍历出的文件名乱序
-    for dirpath, dirnames, filenames in os.walk(binary_root):
-        if filenames:  #  and 'boats' in dirpath  corridor traffic
-            ii += 1
-            print('{} 正在计算评估指标：{}'.format(ii, dirpath))
-            dirpath_list = dirpath.replace('\\', '/').split('/')  # 切割路径
-            algorithm_name_index = dirpath_list.index(os.path.basename(binary_root))  # binary_root 文件位置
-            algorithm_name_type = dirpath_list[algorithm_name_index:-2]  #
-            algorithm_name_type = dirpath_list[(algorithm_name_index - 1):-2] if len(algorithm_name_type) == 1 else algorithm_name_type
-            save_filename_ = '_'.join(algorithm_name_type) + '.csv'  # 保存stats时的文件名
-            if save_filename_ != save_filename:
-                if save_filename:
-                    # 综合统计
-                    write_category_and_overall_tocsv(stats_root, save_filename)
-                save_filename = save_filename_
+    p_bar = tqdm(total = 53)
+    # Loop over all categories that were retrieved
+    for category in categories:
+        # Loop over all videos
+        for video in videos[category]:
+            # Definition of the video directory path
+            video_dir_datasets = os.path.join(dataset_root, category, video)
+            video_dir_binary = os.path.join(binary_root, category, video)
 
-            category_video = dirpath_list[-2:]  # 保存时的索引名称 stats
+            if not os.path.exists(video_dir_binary):
+                continue
 
-            # 数据集的视频序列路径mt=45_ratio=0.2_yolact_vibe
-            dataset_video_path = os.path.join(dataset_root, dirpath_list[-2], dirpath_list[-1])
-            if not os.path.exists(dataset_video_path):
-                dataset_video_path = os.path.join(dataset_root, dirpath_list[-2], dirpath_list[-2], dirpath_list[-1])
+            # ii += 1
+            # print('{} 正在计算评估指标：{}'.format(ii, video_dir_datasets))
 
-            if is_valid_video_folder(dataset_video_path):
+            if is_valid_video_folder(video_dir_datasets):  # 检测数据集是否有效
                 # 混淆矩阵
                 CM = ConfusionMatrix()
-                confusion_matrix = compare_with_groundtruth(CM, dataset_video_path, dirpath)
+                confusion_matrix = compare_with_groundtruth(CM, video_dir_datasets, video_dir_binary)
 
                 frames_stats = get_stats(confusion_matrix)  # 7中度量
-                frames_category = get_category_video(category_video)  # 索引名 stats
+                frames_category = get_category_video(category, video)  # 索引名 stats
                 frames_category.update(frames_stats)  # 合并数据
 
                 # 保存数据
                 write_result_tocsv(stats_root, save_filename, frames_category)
 
-    if save_filename:
-        write_category_and_overall_tocsv(stats_root, save_filename)
+            p_bar.update(1)
+
+    write_category_and_overall_tocsv(stats_root, save_filename)
+    p_bar.close()
 
 
 if __name__ == '__main__':
-    # # 数据集根目录
-    # dataset_root = 'E:/00_Datasets/dataset2014/dataset'
-    # # 检测结果根目录
-    # binary_root = r"E:\01_PyCharm\01_CV\20210714_instance_segmentation\20210716_yolact\results\20210731_yolact_subsense\mt=45_ratio=0.3_yolact_vibe"
-    # # 统计结果根目录
-    # stats_root = r'results_stats'
+    # 数据集根目录
+    dataset_root = 'E:/00_Datasets/dataset2014/dataset'
+    # 检测结果根目录
+    # binary_root = r"E:\01_PyCharm\01_CV\20210714_instance_segmentation\20210716_yolact\results\202108015_yolact_vibe_mask\mt=45_ratio=0.3_yolact_vibe20210815"
+    binary_root = r"E:\00_Datasets\subsense\subsense_cdnet2014\results"
+    # 统计结果根目录
+    stats_root = r'results_stats'
     # #################################################################
-    # python python_stats/stats.py --br  --sr
-    dataset_root = args.dr
-    # "/home/lthpc/sumex/20210807_ISBS/20210811_ISBS/results/yolact_vibe/20210812_ratio=0.3_opt=0"
-    binary_root = args.br
-    # "/home/lthpc/sumex/20210807_ISBS/20210811_ISBS/results_stats"
-    stats_root = os.path.join(args.sr, args.sub) if args.sub else args.sr
+    # # python python_stats/stats.py --br  --sr
+    # dataset_root = args.dr
+    # # "/home/lthpc/sumex/20210807_ISBS/20210811_ISBS/results/yolact_vibe/20210812_ratio=0.3_opt=0"
+    # binary_root = args.br
+    # # "/home/lthpc/sumex/20210807_ISBS/20210811_ISBS/results_stats"
+    # stats_root = os.path.join(args.sr, args.sub) if args.sub else args.sr
 
     stats(dataset_root, binary_root, stats_root)
